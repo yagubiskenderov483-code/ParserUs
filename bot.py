@@ -15,8 +15,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 # ========================
 API_ID = 28687552
 API_HASH = "1abf9a58d0c22f62437bec89bd6b27a3"
-BOT_TOKEN = "8559985318:AAHJdshGOYv1hQMEM6kpOFFJzL1lX9OnCGw"
-ADMIN_ID = 174415647
+BOT_TOKEN = "8247363509:AAGF6ak5b7fMmI6Pqs91lGia9yxrXMiqrUg"
+ADMIN_ID = 7602363090
 # ========================
 
 logging.basicConfig(level=logging.INFO)
