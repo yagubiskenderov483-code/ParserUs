@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from telethon import TelegramClient
+from telethon import TelegramClient, errors
 from telethon.tl.functions.channels import GetParticipantsRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest
 from telethon.tl.types import ChannelParticipantsSearch
@@ -34,41 +34,28 @@ class Auth(StatesGroup):
     password = State()
 
 
-# ===================== HELPERS =====================
-
 def extract_username(user) -> str:
-    """
-    Надёжно достаёт username.
-    Новый API: user.usernames — список объектов с .username
-    Старый API: user.username — строка
-    """
     usernames = getattr(user, 'usernames', None)
     if usernames:
         for u in usernames:
             val = getattr(u, 'username', None)
             if val:
                 return f"@{val}"
-
     uname = getattr(user, 'username', None)
     if uname:
         return f"@{uname}"
-
     return "нет username"
 
 
 async def ensure_connected(client: TelegramClient):
-    """Гарантирует что клиент подключён перед любым запросом."""
     if not client.is_connected():
         await client.connect()
         await asyncio.sleep(0.5)
 
 
 async def resolve_entity(client: TelegramClient, group_link: str):
-    """Получить entity группы — публичные и приватные ссылки."""
     await ensure_connected(client)
-
     link = group_link.strip()
-
     invite_hash = None
     if "+joinchat/" in link:
         invite_hash = link.split("+joinchat/")[-1].rstrip("/")
@@ -83,7 +70,6 @@ async def resolve_entity(client: TelegramClient, group_link: str):
             if hasattr(result, 'chats') and result.chats:
                 return result.chats[0], True
         except UserAlreadyParticipantError:
-            # Уже участник — пробуем получить через get_entity
             try:
                 entity = await client.get_entity(f"t.me/+{invite_hash}")
                 return entity, False
@@ -110,7 +96,6 @@ async def resolve_entity(client: TelegramClient, group_link: str):
 
 
 async def get_group_members(client: TelegramClient, group_link: str, status_msg=None):
-    """Парсинг: стандартный список + символы + история сообщений."""
     try:
         await ensure_connected(client)
         entity, just_joined = await resolve_entity(client, group_link)
@@ -127,7 +112,6 @@ async def get_group_members(client: TelegramClient, group_link: str, status_msg=
                             "name": f"{user.first_name or ''} {user.last_name or ''}".strip()
                         }
 
-        # ── Метод 1: стандартный список ──
         try:
             offset = 0
             while True:
@@ -150,12 +134,10 @@ async def get_group_members(client: TelegramClient, group_link: str, status_msg=
 
         if status_msg:
             try:
-                await status_msg.edit_text(
-                    f"⚡️ Метод 1 готов\n👥 Найдено: {len(members_dict)}\n🔍 Запускаю перебор символов...")
+                await status_msg.edit_text(f"⚡️ Метод 1 готов\n👥 Найдено: {len(members_dict)}\n🔍 Запускаю перебор символов...")
             except Exception:
                 pass
 
-        # ── Метод 2: перебор символов ──
         chars = list("abcdefghijklmnopqrstuvwxyz0123456789_")
         semaphore = asyncio.Semaphore(3)
 
@@ -198,36 +180,27 @@ async def get_group_members(client: TelegramClient, group_link: str, status_msg=
             await asyncio.gather(*[fetch_by_char(c) for c in batch])
             if status_msg and i % 10 == 0:
                 try:
-                    await status_msg.edit_text(
-                        f"⚡️ Перебор символов: {i}/{len(chars)}\n"
-                        f"👥 Найдено: {len(members_dict)}"
-                    )
+                    await status_msg.edit_text(f"⚡️ Перебор символов: {i}/{len(chars)}\n👥 Найдено: {len(members_dict)}")
                 except Exception:
                     pass
 
         if status_msg:
             try:
-                await status_msg.edit_text(
-                    f"⚡️ Символы готовы\n👥 Найдено: {len(members_dict)}\n📜 Читаю историю сообщений...")
+                await status_msg.edit_text(f"⚡️ Символы готовы\n👥 Найдено: {len(members_dict)}\n📜 Читаю историю сообщений...")
             except Exception:
                 pass
 
-        # ── Метод 3: история сообщений ──
         try:
             await ensure_connected(client)
             msg_count = 0
             user_ids_to_fetch = set()
-
             async for msg in client.iter_messages(entity, limit=5000):
                 if msg.sender_id and msg.sender_id not in members_dict:
                     user_ids_to_fetch.add(msg.sender_id)
                 msg_count += 1
                 if msg_count % 1000 == 0 and status_msg:
                     try:
-                        await status_msg.edit_text(
-                            f"📜 Читаю историю: {msg_count} сообщений\n"
-                            f"👥 Найдено: {len(members_dict)}"
-                        )
+                        await status_msg.edit_text(f"📜 Читаю историю: {msg_count} сообщений\n👥 Найдено: {len(members_dict)}")
                     except Exception:
                         pass
 
@@ -247,7 +220,6 @@ async def get_group_members(client: TelegramClient, group_link: str, status_msg=
             for i in range(0, len(uid_list), 20):
                 batch = uid_list[i:i + 20]
                 await asyncio.gather(*[fetch_user(uid) for uid in batch])
-
         except Exception as e:
             logger.warning(f"История недоступна: {e}")
 
@@ -275,29 +247,25 @@ async def get_or_create_client(uid: int) -> TelegramClient:
                 await client.connect()
                 user_clients[uid] = client
         return client
-
     client = TelegramClient(f"session_{uid}", API_ID, API_HASH)
     await client.connect()
     user_clients[uid] = client
     return client
 
 
-# ===================== HANDLERS =====================
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
         await message.answer("❌ У тебя нет доступа к этому боту")
         return
-
     await state.clear()
     client = await get_or_create_client(message.from_user.id)
-
     if await client.is_user_authorized():
         me = await client.get_me()
         await message.answer(
             f"👋 Привет! Я бот для парсинга участников групп.\n\n"
             f"✅ Авторизован как: {me.first_name} (@{me.username})\n\n"
-            f"Отправь ссылку на группу (например <code>t.me/groupname</code>) и я спаршу всех участников!",
+            f"Отправь ссылку на группу и я спаршу всех участников!",
             parse_mode="HTML"
         )
     else:
@@ -345,6 +313,16 @@ async def auth_phone(message: Message, state: FSMContext):
 
     try:
         await ensure_connected(client)
+
+        if await client.is_user_authorized():
+            me = await client.get_me()
+            await state.clear()
+            await message.answer(
+                f"✅ Уже авторизован как: <b>{me.first_name}</b> (@{me.username})\n\nОтправь ссылку на группу.",
+                parse_mode="HTML"
+            )
+            return
+
         result = await client.send_code_request(phone)
         await state.update_data(phone=phone, phone_code_hash=result.phone_code_hash)
         await state.set_state(Auth.code)
@@ -352,8 +330,23 @@ async def auth_phone(message: Message, state: FSMContext):
             "📨 Код отправлен в Telegram!\n\nВведи код слитно: <code>12345</code>",
             parse_mode="HTML"
         )
+    except errors.FloodWaitError as e:
+        await message.answer(
+            f"⏳ Слишком много попыток. Подожди <b>{e.seconds}</b> секунд и попробуй снова.",
+            parse_mode="HTML"
+        )
+    except errors.PhoneNumberInvalidError:
+        await message.answer("❌ Неверный номер телефона. Проверь формат: <code>+79001234567</code>", parse_mode="HTML")
     except Exception as e:
-        await message.answer(f"❌ Ошибка при отправке кода: <code>{e}</code>", parse_mode="HTML")
+        error_text = str(e)
+        if "ResendCodeRequest" in error_text or "all available options" in error_text:
+            await message.answer(
+                "⏳ Telegram временно заблокировал отправку кода на этот номер.\n\n"
+                "Подожди <b>10-15 минут</b> и попробуй снова через /auth",
+                parse_mode="HTML"
+            )
+        else:
+            await message.answer(f"❌ Ошибка: <code>{e}</code>", parse_mode="HTML")
         logger.error(f"send_code error: {e}")
 
 
@@ -361,13 +354,11 @@ async def auth_phone(message: Message, state: FSMContext):
 async def auth_code(message: Message, state: FSMContext):
     code = message.text.strip().replace(" ", "")
     data = await state.get_data()
-
     client = user_clients.get(message.from_user.id)
     if not client:
         await message.answer("❌ Сессия потеряна. Начни заново: /auth")
         await state.clear()
         return
-
     try:
         await ensure_connected(client)
         await client.sign_in(phone=data["phone"], code=code, phone_code_hash=data["phone_code_hash"])
@@ -393,7 +384,6 @@ async def auth_password(message: Message, state: FSMContext):
         await message.answer("❌ Сессия потеряна. Начни заново: /auth")
         await state.clear()
         return
-
     try:
         await ensure_connected(client)
         await client.sign_in(password=message.text.strip())
@@ -413,22 +403,17 @@ async def handle_group_link(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
         await message.answer("❌ У тебя нет доступа")
         return
-
     current_state = await state.get_state()
     if current_state is not None:
         return
-
     group_link = message.text.strip()
     if not group_link or group_link.startswith("/"):
         return
-
     client = user_clients.get(message.from_user.id)
     if not client or not await client.is_user_authorized():
         await message.answer("❌ Сначала авторизуйся!\n\nИспользуй /auth для входа в аккаунт.")
         return
-
     await message.answer(f"⏳ Подключаюсь к группе: <code>{group_link}</code>...", parse_mode="HTML")
-
     try:
         await ensure_connected(client)
         entity, just_joined = await resolve_entity(client, group_link)
@@ -437,20 +422,15 @@ async def handle_group_link(message: Message, state: FSMContext):
     except Exception as e:
         await message.answer(f"❌ {e}")
         return
-
     status_msg = await message.answer("🔍 Парсинг запущен...\n⏱ Подожди несколько минут.\n👥 Найдено: 0")
-
     members, group_title = await get_group_members(client, group_link, status_msg)
-
     if members is None:
         await message.answer(f"❌ Ошибка: {group_title}")
         return
-
     await message.answer(
         f"✅ Найдено <b>{len(members)}</b> участников в <b>'{group_title}'</b>\n\nНачинаю отправлять...",
         parse_mode="HTML"
     )
-
     chunk_size = 50
     for i in range(0, len(members), chunk_size):
         chunk = members[i:i + chunk_size]
@@ -460,11 +440,9 @@ async def handle_group_link(message: Message, state: FSMContext):
             lines.append(f"#{j} {user['username']}{name} | ID: {user['id']}")
         await message.answer("\n".join(lines))
         await asyncio.sleep(0.3)
-
     await message.answer(f"✅ Готово! Спаршено <b>{len(members)}</b> участников", parse_mode="HTML")
 
 
-# ===================== MAIN =====================
 async def main():
     logger.info("🤖 Парсер запущен...")
     try:
