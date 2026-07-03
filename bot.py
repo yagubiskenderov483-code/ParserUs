@@ -16,7 +16,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 API_ID = 28687552
 API_HASH = "1abf9a58d0c22f62437bec89bd6b27a3"
 BOT_TOKEN = "8911943896:AAFo0BSI6FMEFJUxt-UmWtA1105sMfMWOW8"
-ADMIN_ID = 90283607,8726084830
+ADMIN_IDS = [8711380424, 90283607]
 # ========================
 
 logging.basicConfig(level=logging.INFO)
@@ -280,7 +280,7 @@ async def get_or_create_client(uid: int) -> TelegramClient:
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID:
+    if message.from_user.id not in ADMIN_IDS:
         await message.answer("❌ У тебя нет доступа к этому боту")
         return
     await state.clear()
@@ -304,7 +304,7 @@ async def cmd_start(message: Message, state: FSMContext):
 
 @dp.message(Command("auth"))
 async def cmd_auth(message: Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID:
+    if message.from_user.id not in ADMIN_IDS:
         return
     await state.clear()
     await message.answer("📱 Введи номер телефона: <code>+79001234567</code>", parse_mode="HTML")
@@ -313,7 +313,7 @@ async def cmd_auth(message: Message, state: FSMContext):
 
 @dp.message(Command("logout"))
 async def cmd_logout(message: Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID:
+    if message.from_user.id not in ADMIN_IDS:
         return
     uid = message.from_user.id
     if uid in user_clients:
@@ -434,7 +434,7 @@ async def auth_password(message: Message, state: FSMContext):
 
 @dp.message(F.text)
 async def handle_group_link(message: Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID:
+    if message.from_user.id not in ADMIN_IDS:
         await message.answer("❌ У тебя нет доступа")
         return
     current_state = await state.get_state()
