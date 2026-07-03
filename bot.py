@@ -3,7 +3,7 @@ import logging
 from telethon import TelegramClient, errors
 from telethon.tl.functions.channels import GetParticipantsRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest
-from telethon.tl.types import ChannelParticipantsSearch
+from telethon.tl.types import ChannelParticipantsSearch, Channel, Chat
 from telethon.errors import SessionPasswordNeededError, UserAlreadyParticipantError, InviteHashExpiredError
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -47,6 +47,18 @@ def extract_username(user) -> str:
     return "нет username"
 
 
+def extract_title(entity) -> str:
+    """Безопасно достаём название сущности (канал/группа/юзер)."""
+    title = getattr(entity, 'title', None)
+    if title:
+        return title
+    first_name = getattr(entity, 'first_name', None)
+    if first_name:
+        last_name = getattr(entity, 'last_name', None) or ""
+        return f"{first_name} {last_name}".strip()
+    return "Без названия"
+
+
 async def ensure_connected(client: TelegramClient):
     if not client.is_connected():
         await client.connect()
@@ -70,17 +82,15 @@ async def resolve_entity(client: TelegramClient, group_link: str):
             if hasattr(result, 'chats') and result.chats:
                 return result.chats[0], True
         except UserAlreadyParticipantError:
-            try:
-                entity = await client.get_entity(f"t.me/+{invite_hash}")
-                return entity, False
-            except Exception:
-                pass
+            # Уже состоим в группе - пробуем узнать её через CheckChatInviteRequest
             try:
                 check = await client(CheckChatInviteRequest(invite_hash))
-                if hasattr(check, 'chat'):
-                    return check.chat, False
+                chat = getattr(check, 'chat', None)
+                if chat:
+                    return chat, False
             except Exception as e:
                 raise Exception(f"❌ Уже участник, но не смог получить группу: {e}")
+            raise Exception("❌ Уже участник группы, но не удалось определить её ID")
         except InviteHashExpiredError:
             raise Exception("❌ Ссылка-приглашение устарела или недействительна")
         except Exception as e:
@@ -92,13 +102,20 @@ async def resolve_entity(client: TelegramClient, group_link: str):
         group_name = link
 
     await ensure_connected(client)
-    return await client.get_entity(group_name), False
+    try:
+        return await client.get_entity(group_name), False
+    except Exception as e:
+        raise Exception(f"❌ Не удалось найти группу/канал: {e}")
 
 
 async def get_group_members(client: TelegramClient, group_link: str, status_msg=None):
     try:
         await ensure_connected(client)
         entity, just_joined = await resolve_entity(client, group_link)
+
+        if not isinstance(entity, (Channel, Chat)):
+            return None, "❌ Эта ссылка ведёт не на группу/канал, а на пользователя или что-то другое"
+
         members_dict = {}
         lock = asyncio.Lock()
 
@@ -129,8 +146,8 @@ async def get_group_members(client: TelegramClient, group_link: str, status_msg=
                 if offset >= result.count:
                     break
                 await asyncio.sleep(0.3)
-        except Exception as e:
-            logger.warning(f"Метод 1 ошибка: {e}")
+        except Exception:
+            logger.warning("Метод 1 (полный список) не сработал", exc_info=True)
 
         if status_msg:
             try:
@@ -170,8 +187,11 @@ async def get_group_members(client: TelegramClient, group_link: str, status_msg=
                                 break
                             await asyncio.sleep(0.15)
                     await asyncio.sleep(0.15)
-                except Exception as e:
-                    logger.warning(f"fetch_by_char '{char}': {e}")
+                except errors.FloodWaitError as e:
+                    logger.warning(f"FloodWait на символе '{char}': ждём {e.seconds}с")
+                    await asyncio.sleep(e.seconds)
+                except Exception:
+                    logger.warning(f"fetch_by_char '{char}' ошибка", exc_info=True)
                     await asyncio.sleep(1)
 
         batch_size = 5
@@ -220,8 +240,8 @@ async def get_group_members(client: TelegramClient, group_link: str, status_msg=
             for i in range(0, len(uid_list), 20):
                 batch = uid_list[i:i + 20]
                 await asyncio.gather(*[fetch_user(uid) for uid in batch])
-        except Exception as e:
-            logger.warning(f"История недоступна: {e}")
+        except Exception:
+            logger.warning("История сообщений недоступна", exc_info=True)
 
         if status_msg:
             try:
@@ -229,10 +249,10 @@ async def get_group_members(client: TelegramClient, group_link: str, status_msg=
             except Exception:
                 pass
 
-        return list(members_dict.values()), entity.title
+        return list(members_dict.values()), extract_title(entity)
 
     except Exception as e:
-        logger.error(f"get_group_members error: {e}")
+        logger.error(f"get_group_members error: {e}", exc_info=True)
         return None, str(e)
 
 
@@ -242,11 +262,16 @@ async def get_or_create_client(uid: int) -> TelegramClient:
         if not client.is_connected():
             try:
                 await client.connect()
+                return client
             except Exception:
-                client = TelegramClient(f"session_{uid}", API_ID, API_HASH)
-                await client.connect()
-                user_clients[uid] = client
-        return client
+                logger.warning(f"Не удалось переподключить клиента {uid}, создаю новый", exc_info=True)
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+        else:
+            return client
+
     client = TelegramClient(f"session_{uid}", API_ID, API_HASH)
     await client.connect()
     user_clients[uid] = client
@@ -294,6 +319,10 @@ async def cmd_logout(message: Message, state: FSMContext):
     if uid in user_clients:
         try:
             await user_clients[uid].log_out()
+        except Exception:
+            pass
+        try:
+            await user_clients[uid].disconnect()
         except Exception:
             pass
         del user_clients[uid]
@@ -347,7 +376,7 @@ async def auth_phone(message: Message, state: FSMContext):
             )
         else:
             await message.answer(f"❌ Ошибка: <code>{e}</code>", parse_mode="HTML")
-        logger.error(f"send_code error: {e}")
+        logger.error(f"send_code error: {e}", exc_info=True)
 
 
 @dp.message(Auth.code)
@@ -371,10 +400,15 @@ async def auth_code(message: Message, state: FSMContext):
     except SessionPasswordNeededError:
         await state.set_state(Auth.password)
         await message.answer("🔐 Включена двухфакторная аутентификация.\nВведи пароль:")
+    except errors.PhoneCodeInvalidError:
+        await message.answer("❌ Неверный код. Попробуй ввести ещё раз.")
+    except errors.PhoneCodeExpiredError:
+        await message.answer("❌ Код истёк. Начни заново: /auth")
+        await state.clear()
     except Exception as e:
         await message.answer(f"❌ Ошибка: <code>{e}</code>\n\nПопробуй снова: /auth", parse_mode="HTML")
         await state.clear()
-        logger.error(f"sign_in error: {e}")
+        logger.error(f"sign_in error: {e}", exc_info=True)
 
 
 @dp.message(Auth.password)
@@ -395,7 +429,7 @@ async def auth_password(message: Message, state: FSMContext):
         )
     except Exception as e:
         await message.answer(f"❌ Неверный пароль: <code>{e}</code>", parse_mode="HTML")
-        logger.error(f"2FA error: {e}")
+        logger.error(f"2FA error: {e}", exc_info=True)
 
 
 @dp.message(F.text)
@@ -418,7 +452,7 @@ async def handle_group_link(message: Message, state: FSMContext):
         await ensure_connected(client)
         entity, just_joined = await resolve_entity(client, group_link)
         if just_joined:
-            await message.answer(f"✅ Вступил в группу: <b>{entity.title}</b>", parse_mode="HTML")
+            await message.answer(f"✅ Вступил в группу: <b>{extract_title(entity)}</b>", parse_mode="HTML")
     except Exception as e:
         await message.answer(f"❌ {e}")
         return
